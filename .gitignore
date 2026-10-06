@@ -1,0 +1,18 @@
+.env
+cdk.out/
+__pycache__/
+*.pyc
+.venv/
+venv/
+# vendored lambda deps (rebuilt by scripts/build_interceptor.sh)
+src/interceptor/jwt/
+src/interceptor/jwt*
+src/interceptor/cryptography/
+src/interceptor/cryptography*
+src/interceptor/cffi*
+src/interceptor/_cffi*
+src/interceptor/pycparser*
+src/interceptor/*.dist-info/
+src/interceptor/*.so
+src/interceptor/bin/
+.DS_Store
