@@ -15,7 +15,6 @@ the Gateway hop, so a prompt-injected model cannot exfiltrate it.
 > Deploy-ready CDK (Python). Self-contained demo: a stand-in 3rd-party API Lambda
 > lets you exercise the whole path without a real vendor.
 
-![sequence](docs/sequence.png)
 
 Full sequence + per-field config: [`docs/sequence.md`](docs/sequence.md).
 
@@ -75,7 +74,8 @@ scripts/
   create_secret.sh          (optional) secret for the special endpoint's own credential
   deploy.sh                 build + synth + deploy
 tests/test_interceptor.py   unit tests for the interceptor logic (no AWS needed)
-docs/sequence.{md,png}      the full sequence diagram
+docs/sequence.md            the full sequence diagram (Mermaid)
+docs/topology.md            deployment topology (Mermaid)
 ```
 
 ## Prerequisites
