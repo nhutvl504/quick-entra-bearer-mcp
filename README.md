@@ -21,7 +21,6 @@ Full sequence + per-field config: [`docs/sequence.md`](docs/sequence.md).
 
 Deployment topology (what runs where, trust boundaries): [`docs/topology.md`](docs/topology.md).
 
-![topology](docs/topology.png)
 
 ## Architecture
 
