@@ -1,6 +1,6 @@
 """Main stack: AgentCore Gateway (inbound CUSTOM_JWT = Entra) + a REQUEST
 Lambda interceptor that turns the per-user email claim into a per-user bearer
-from a special endpoint, and a demo 3rd-party API target.
+from a special endpoint, and a CUSTOM BACKEND (API Gateway + Lambda) as the target.
 
 Why this shape:
   * Amazon Quick is the MCP client. It does 3LO with Entra ID and presents a
@@ -9,9 +9,14 @@ Why this shape:
   * The vendor bearer is NOT a static key, so the sample's ApiKeyCredentialProvider
     cannot express it. Instead a REQUEST interceptor Lambda runs on every tool
     call: it reads the email claim, exchanges it at the special endpoint for a
-    short-lived per-user bearer (cached by email), and injects it downstream.
-  * The target carries NO gateway-level credential — the interceptor is the only
-    thing that authenticates the downstream call.
+    short-lived per-user bearer (cached by email), and REPLACES the Authorization
+    header. AWS forwards the interceptor's Authorization header to the target
+    (see docs/caveats.md -> gateway-headers).
+  * The Gateway target is a CUSTOM BACKEND you own: API Gateway (REST) -> backend
+    Lambda, which calls the real vendor API with the injected bearer. This is the
+    AWS sample's own target shape (a Lambda/REST you own) rather than an OpenAPI
+    target pointed straight at a host you don't control, and it lets the backend
+    map tool args, normalise vendor responses, and keep the vendor URL server-side.
 
 AgentCore resources are L1 (Cfn*) because there is no stable L2 yet. The service
 validates the target at deploy time by calling tools/list, so a bad endpoint or a
@@ -25,9 +30,9 @@ from aws_cdk import (
     Aws,
     CfnOutput,
     Duration,
-    RemovalPolicy,
     Stack,
 )
+from aws_cdk import aws_apigateway as apigw
 from aws_cdk import aws_bedrockagentcore as agentcore
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as lambda_
@@ -43,20 +48,62 @@ class QuickEntraBearerStack(Stack):
         super().__init__(scope, construct_id, **kwargs)
         self.settings = settings
 
-        demo_api = self._demo_third_party_api()
+        backend_url = self._backend_api()
         interceptor = self._interceptor_lambda()
         gateway = self._gateway(interceptor)
-        self._gateway_target(gateway, demo_api)
+        self._gateway_target(gateway, backend_url)
 
         CfnOutput(self, "GatewayMcpUrl", value=gateway.attr_gateway_url)
         CfnOutput(self, "GatewayArn", value=gateway.attr_gateway_arn)
         CfnOutput(self, "InterceptorArn", value=interceptor.function_arn)
-        CfnOutput(self, "DemoThirdPartyApiUrl", value=demo_api.function_url)
+        CfnOutput(self, "BackendApiUrl", value=backend_url)
 
     # ──────────────────────────────────────────────────────────────────
-    # Demo 3rd-party API (stands in for the customer's app during the demo).
-    # Validates a Bearer token and echoes who called. Lets you run the whole
-    # path end-to-end without a real vendor. Replace with the real URL for prod.
+    # Custom backend: API Gateway (REST) -> backend Lambda. This is the
+    # Gateway TARGET. The backend receives a request whose Authorization has
+    # already been swapped by the interceptor to the per-user vendor bearer,
+    # then calls the real vendor API. For the demo, the vendor is faked by
+    # DEMO_THIRD_PARTY (below); for prod set THIRD_PARTY_BASE_URL to the vendor.
+    # ──────────────────────────────────────────────────────────────────
+    def _backend_api(self) -> str:
+        backend = lambda_.Function(
+            self,
+            "BackendFn",
+            runtime=lambda_.Runtime.PYTHON_3_13,
+            handler="handler.lambda_handler",
+            code=lambda_.Code.from_asset("src/backend"),
+            timeout=Duration.seconds(20),
+            memory_size=256,
+            description="Gateway target backend: calls vendor API with injected bearer",
+            environment={
+                "THIRD_PARTY_BASE_URL": self.settings.third_party_base_url,
+            },
+        )
+
+        api = apigw.LambdaRestApi(
+            self,
+            "BackendApi",
+            handler=backend,
+            proxy=False,
+            rest_api_name="quick-entra-bearer-backend",
+            deploy_options=apigw.StageOptions(
+                stage_name="prod",
+                logging_level=apigw.MethodLoggingLevel.ERROR,
+            ),
+            # The interceptor forwards Authorization automatically; no auth here
+            # (this façade is only reachable from the Gateway target hop).
+        )
+        data = api.root.add_resource("data")
+        data.add_method("POST")
+
+        # api.url ends with a trailing slash; the Gateway target server URL is
+        # the stage root, and the OpenAPI path "/data" appends to it.
+        return api.url.rstrip("/")
+
+    # ──────────────────────────────────────────────────────────────────
+    # (Demo vendor API kept for local/standalone testing of the backend; it is
+    # NOT wired as the Gateway target anymore. Point THIRD_PARTY_BASE_URL at it
+    # to exercise the backend end-to-end without a real vendor.)
     # ──────────────────────────────────────────────────────────────────
     def _demo_third_party_api(self) -> lambda_.Function:
         fn = lambda_.Function(
@@ -69,7 +116,6 @@ class QuickEntraBearerStack(Stack):
             memory_size=128,
             description="Demo 3rd-party API: checks Bearer, echoes caller",
         )
-        # Public function URL so the Gateway (outside the VPC) can reach it.
         url = fn.add_function_url(auth_type=lambda_.FunctionUrlAuthType.NONE)
         fn.function_url = url.url  # type: ignore[attr-defined]
         return fn
@@ -177,16 +223,16 @@ class QuickEntraBearerStack(Stack):
         return gateway
 
     def _gateway_target(
-        self, gateway: agentcore.CfnGateway, demo_api: lambda_.Function
+        self, gateway: agentcore.CfnGateway, backend_url: str
     ) -> None:
-        # OpenAPI target pointed at the 3rd-party API. NO credential provider:
-        # the interceptor injects Authorization. For the demo we point at the
-        # demo API's function URL; for prod set THIRD_PARTY_BASE_URL.
-        base_url = self.settings.third_party_base_url
+        # OpenAPI target pointed at OUR backend (API Gateway), not the vendor.
+        # NO credential provider: the interceptor injects Authorization, and the
+        # backend forwards it to the vendor. The OpenAPI server URL is the API
+        # Gateway stage root; "/data" appends to it.
         openapi = {
             "openapi": "3.0.0",
-            "info": {"title": "Customer 3rd-party API", "version": "1.0.0"},
-            "servers": [{"url": base_url}],
+            "info": {"title": "Customer backend facade", "version": "1.0.0"},
+            "servers": [{"url": backend_url}],
             "paths": {
                 "/data": {
                     "post": {

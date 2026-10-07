@@ -32,10 +32,21 @@ Amazon Quick  --3LO Entra, per-user JWT-->  AgentCore Gateway (inbound CUSTOM_JW
                                    1. validate Entra JWT (JWKS cache)
                                    2. read email claim
                                    3. email -> special endpoint -> bearer (cached per email, TTL)
-                                   4. inject  Authorization: Bearer <3rd>
+                                   4. REPLACE Authorization: Bearer <3rd>
                                                    |
-                                            3rd-party API  (OpenAPI target, NO vendor credential)
+                                   Gateway Target = OUR backend  (NO vendor credential)
+                                                   |
+                                   API Gateway (REST) -> Backend Lambda
+                                                   |
+                                   3rd-party API  (called with the injected bearer)
 ```
+
+The Gateway target is a **custom backend you own** (API Gateway + Lambda), not an
+OpenAPI target pointed straight at the vendor. The interceptor replaces the
+`Authorization` header with the per-user vendor bearer, the Gateway forwards it to
+the backend (AWS documents this — see [`docs/caveats.md`](docs/caveats.md)), and the
+backend calls the real vendor API. This is the AWS sample's own target shape (a
+Lambda/REST you own) and keeps the vendor URL server-side.
 
 Why a Request Interceptor and not an `ApiKeyCredentialProvider`: the vendor bearer
 is **dynamic and per-user**, derived at call time from the signed-in user's email.
@@ -53,11 +64,13 @@ Why **3LO** (not 2LO): we need the **email of the user who is chatting**. 2LO
 ```
 app.py                      CDK entrypoint
 settings.py                 env-driven config (nothing secret here)
-infra/stack.py              THE stack: Gateway (CUSTOM_JWT=Entra) + interceptor + target + demo API
+infra/stack.py              THE stack: Gateway (CUSTOM_JWT=Entra) + interceptor + backend(API GW+Lambda) target
 src/interceptor/
   lambda_function.py        the Request Interceptor (Entra -> email -> bearer)
 src/third_party_api/
-  handler.py                demo 3rd-party API (checks Bearer, echoes caller)
+  handler.py                demo 3rd-party API (local stand-in for the vendor)
+src/backend/
+  handler.py                backend behind API Gateway = the Gateway target; calls vendor with injected bearer
 scripts/
   build_interceptor.sh      vendor PyJWT[crypto] into the interceptor asset
   create_secret.sh          (optional) secret for the special endpoint's own credential
@@ -102,7 +115,7 @@ bash scripts/deploy.sh
 ```
 
 `deploy.sh` vendors PyJWT into the interceptor asset, synthesizes, and deploys.
-Outputs: `GatewayMcpUrl`, `GatewayArn`, `InterceptorArn`, `DemoThirdPartyApiUrl`.
+Outputs: `GatewayMcpUrl`, `GatewayArn`, `InterceptorArn`, `BackendApiUrl`.
 
 > The Gateway target validates its endpoint at deploy time by calling `tools/list`.
 > A wrong URL or a rejected credential **fails the deployment** rather than 401ing
@@ -125,10 +138,15 @@ Entra app registration must: add that redirect URI, expose an API scope (so the
 
 ## Test the path end-to-end (demo)
 
-After first deploy, set `THIRD_PARTY_BASE_URL` to the `DemoThirdPartyApiUrl` output
-and redeploy, so the Gateway target points at the demo API. Then from a Quick chat
-agent invoke the `get_customer_data` tool; the demo API echoes the token prefix,
-proving the interceptor swapped the Entra token for a downstream bearer.
+The Gateway target is the backend (API Gateway + Lambda); the backend calls whatever
+`THIRD_PARTY_BASE_URL` points at. To exercise it without a real vendor, deploy the
+demo vendor Lambda and set `THIRD_PARTY_BASE_URL` to its Function URL, then from a
+Quick chat invoke the `get_customer_data` tool. Confirm in CloudWatch:
+interceptor logs show the Authorization header replaced with the per-user bearer, and
+the backend logs show the vendor call succeeding with that bearer.
+
+See [`docs/caveats.md`](docs/caveats.md) for what is AWS-documented vs. to-verify,
+and the Entra `AADSTS` gotchas.
 
 ## Run unit tests
 
