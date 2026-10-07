@@ -122,6 +122,10 @@ Outputs: `GatewayMcpUrl`, `GatewayArn`, `InterceptorArn`, `BackendApiUrl`.
 
 ## Wire Amazon Quick (Custom OAuth app = Entra, 3LO)
 
+> Step-by-step with the **two app registrations** (client + resource), the exact
+> fields, and the `AADSTS` troubleshooting table: **[`docs/entra-setup.md`](docs/entra-setup.md)**.
+> One Entra user is enough to demo.
+
 In Amazon Quick → Integrations → Actions → Model Context Protocol → new integration:
 
 - **MCP server endpoint** = the `GatewayMcpUrl` output.
